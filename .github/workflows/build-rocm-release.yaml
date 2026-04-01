@@ -73,14 +73,21 @@ jobs:
           python-version: ${{ matrix.python }}
 
       # ── Build the wheel ──────────────────────────────────────────────────
-      # CMAKE_ARGS enables hipBLAS (ROCm) support and disables native CPU
-      # optimisations so the wheel is portable across x86-64 machines.
-      # hipcc is on PATH after amdgpu-install; no explicit compiler override needed.
+      # CMAKE_ARGS enables hipBLAS (ROCm) support.
+      # amdclang / amdclang++ are AMD’s ROCm-native LLVM/Clang compilers;
+      # hipcc is only a thin wrapper around them. Using them directly is
+      # cleaner and avoids GCC being picked up by CMake as the host compiler.
+      # AMDGPU_TARGETS selects the GPU ISAs to compile for:
+      #   gfx1100 = RDNA3 (RX 7000), gfx1030 = RDNA2 (RX 6000),
+      #   gfx906  = Vega20 (MI50),   gfx908  = Arcturus (MI100)
       - name: Build ROCm wheel
         env:
           CMAKE_ARGS: >-
             -DGGML_HIPBLAS=ON
             -DGGML_NATIVE=OFF
+            -DCMAKE_C_COMPILER=/opt/rocm/bin/amdclang
+            -DCMAKE_CXX_COMPILER=/opt/rocm/bin/amdclang++
+            -DAMDGPU_TARGETS=gfx1100;gfx1030;gfx906;gfx908
           FORCE_CMAKE: "1"
         run: |
           set -euo pipefail
@@ -89,6 +96,44 @@ jobs:
             --no-deps \
             --wheel-dir dist \
             --verbose
+        shell: bash
+
+      # ── Verify ROCm linkage ───────────────────────────────────────────────
+      # Extract the shared library from the wheel and confirm it carries
+      # dynamic dependencies on libhipblas / librocblas. If these are
+      # missing the build silently fell back to CPU-only mode.
+      - name: Verify ROCm (hipBLAS) linkage
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls dist/*.whl | head -1)
+          echo "Inspecting: $WHEEL"
+
+          # Unpack wheel into a temp directory
+          TMPDIR=$(mktemp -d)
+          python -m zipfile -e "$WHEEL" "$TMPDIR"
+
+          # Find the compiled extension (.so)
+          SO=$(find "$TMPDIR" -name '*.so' | head -1)
+          if [ -z "$SO" ]; then
+            echo "ERROR: No .so file found in wheel!"
+            exit 1
+          fi
+          echo "Found shared library: $SO"
+
+          # Check NEEDED entries for HIP/ROCm libraries
+          echo "--- Dynamic dependencies ---"
+          readelf -d "$SO" | grep NEEDED
+
+          # Fail fast if hipblas is not listed as a dependency
+          if readelf -d "$SO" | grep -qi 'hipblas\|rocblas'; then
+            echo "✅ ROCm linkage confirmed (hipblas/rocblas found in NEEDED)."
+          else
+            echo "❌ ERROR: hipblas/rocblas NOT found in NEEDED section!"
+            echo "       The wheel was likely compiled without ROCm support."
+            exit 1
+          fi
+
+          rm -rf "$TMPDIR"
         shell: bash
 
       # ── Fix wheel tags so pip accepts them as linux_x86_64 wheels ─────────
@@ -182,13 +227,17 @@ jobs:
           python-version: ${{ matrix.python }}
 
       # ── Build the wheel ──────────────────────────────────────────────────
-      # On Windows we use MSVC (Visual Studio 2022, available on the runner)
-      # together with the AMD HIP SDK.
-      # AMDGPU_TARGETS covers common consumer (gfx1100 = RDNA3) and data-
-      # center (gfx906, gfx908) GPU architectures.
+      # On Windows the HIP SDK ships clang.exe in %HIP_PATH%\bin.
+      # CMake_HIP_COMPILER points CMake to the HIP-capable clang for device
+      # code, while MSVC (the default generator) handles the host (CPU) code.
+      # This is the officially supported hybrid approach for Windows ROCm.
       - name: Build ROCm wheel (Windows)
         env:
-          CMAKE_ARGS: "-DGGML_HIPBLAS=ON -DGGML_NATIVE=OFF -DAMDGPU_TARGETS=gfx1100;gfx1030;gfx906;gfx908"
+          CMAKE_ARGS: >-
+            -DGGML_HIPBLAS=ON
+            -DGGML_NATIVE=OFF
+            -DCMAKE_HIP_COMPILER="$env:HIP_PATH\bin\clang.exe"
+            -DAMDGPU_TARGETS=gfx1100;gfx1030;gfx906;gfx908
           CMAKE_GENERATOR: "Visual Studio 17 2022"
           FORCE_CMAKE: "1"
         run: |
