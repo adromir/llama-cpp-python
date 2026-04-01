@@ -38,35 +38,32 @@ jobs:
         with:
           submodules: recursive
 
-      # ── Install ROCm via the official AMD repository ──────────────────────
-      # Using the ROCm apt repo for Ubuntu 24.04 (noble).
+      # ── Install ROCm via the official amdgpu-install script ──────────────
+      # AMD no longer exposes a plain apt repo for ROCm 7.x.
+      # The recommended method is the amdgpu-install helper package.
+      # Docs: https://rocm.docs.amd.com/projects/install-on-linux/en/latest/
       - name: Install ROCm ${{ env.ROCM_VERSION }}
         run: |
           set -euo pipefail
 
-          # Add AMD ROCm GPG key and repository
+          # Prerequisites required by amdgpu-install
           sudo apt-get update -y
-          sudo apt-get install -y wget gnupg lsb-release
+          sudo apt-get install -y python3-setuptools python3-wheel wget
 
-          wget -qO - https://repo.radeon.com/rocm/rocm.gpg.key | \
-            gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/rocm.gpg > /dev/null
+          # Download the amdgpu-install helper deb for Ubuntu 24.04 (noble)
+          # Version 7.2.1 installer corresponds to ROCm 7.2
+          INSTALLER_DEB="amdgpu-install_7.2.1.70201-1_all.deb"
+          wget -q "https://repo.radeon.com/amdgpu-install/7.2.1/ubuntu/noble/${INSTALLER_DEB}"
+          sudo apt-get install -y "./${INSTALLER_DEB}"
+          rm -f "./${INSTALLER_DEB}"
 
-          echo "deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/rocm.gpg] \
-            https://repo.radeon.com/rocm/apt/${{ env.ROCM_VERSION }} noble main" | \
-            sudo tee /etc/apt/sources.list.d/rocm.list
-
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            rocm-dev \
-            hipblas-dev \
-            rocblas-dev \
-            rocsolver-dev \
-            rocsparse-dev
+          # Install ROCm stack (no GUI / graphics needed in CI)
+          sudo amdgpu-install -y --usecase=rocm --no-dkms
 
           # Ensure ROCm tools are in PATH for subsequent steps
           echo "/opt/rocm/bin" >> "$GITHUB_PATH"
           echo "ROCM_PATH=/opt/rocm" >> "$GITHUB_ENV"
-          echo "HIP_PATH=/opt/rocm" >> "$GITHUB_ENV"
+          echo "HIP_PATH=/opt/rocm"  >> "$GITHUB_ENV"
         shell: bash
 
       # ── Set up the requested Python version ──────────────────────────────
@@ -77,14 +74,13 @@ jobs:
 
       # ── Build the wheel ──────────────────────────────────────────────────
       # CMAKE_ARGS enables hipBLAS (ROCm) support and disables native CPU
-      # optimisations so the wheel runs on any x86-64 target machine as well.
+      # optimisations so the wheel is portable across x86-64 machines.
+      # hipcc is on PATH after amdgpu-install; no explicit compiler override needed.
       - name: Build ROCm wheel
         env:
           CMAKE_ARGS: >-
             -DGGML_HIPBLAS=ON
             -DGGML_NATIVE=OFF
-            -DCMAKE_C_COMPILER=/opt/rocm/bin/hipcc
-            -DCMAKE_CXX_COMPILER=/opt/rocm/bin/hipcc
           FORCE_CMAKE: "1"
         run: |
           set -euo pipefail
