@@ -99,42 +99,38 @@ jobs:
             --verbose
         shell: bash
 
-      # ── Verify ROCm linkage ───────────────────────────────────────────────
-      # Extract the shared library from the wheel and confirm it carries
-      # dynamic dependencies on libhipblas / librocblas. If these are
-      # missing the build silently fell back to CPU-only mode.
-      - name: Verify ROCm (hipBLAS) linkage
+      # ── Verify ROCm build ───────────────────────────────────────────────
+      # ROCm libraries (libhipblas, librocblas, …) are intentionally kept
+      # external – they live in /opt/rocm on the target system and are NOT
+      # bundled into the wheel. Checking NEEDED entries of libggml-cpu.so
+      # for hipblas would therefore always fail.
+      #
+      # The correct indicator that ROCm support was compiled in is the presence
+      # of the HIP backend shared library (libggml-hip.so) inside the wheel.
+      # llama.cpp builds one .so per backend; it is only created when
+      # GGML_HIPBLAS=ON and a working HIP compiler are present.
+      - name: Verify ROCm (HIP backend) was compiled
         run: |
           set -euo pipefail
           WHEEL=$(ls dist/*.whl | head -1)
           echo "Inspecting: $WHEEL"
 
-          # Unpack wheel into a temp directory
-          TMPDIR=$(mktemp -d)
-          python -m zipfile -e "$WHEEL" "$TMPDIR"
+          # List all .so files inside the wheel for diagnostic purposes
+          echo "--- Shared libraries in wheel ---"
+          python -m zipfile -l "$WHEEL" | grep '\.so'
 
-          # Find the compiled extension (.so)
-          SO=$(find "$TMPDIR" -name '*.so' | head -1)
-          if [ -z "$SO" ]; then
-            echo "ERROR: No .so file found in wheel!"
-            exit 1
-          fi
-          echo "Found shared library: $SO"
-
-          # Check NEEDED entries for HIP/ROCm libraries
-          echo "--- Dynamic dependencies ---"
-          readelf -d "$SO" | grep NEEDED
-
-          # Fail fast if hipblas is not listed as a dependency
-          if readelf -d "$SO" | grep -qi 'hipblas\|rocblas'; then
-            echo "✅ ROCm linkage confirmed (hipblas/rocblas found in NEEDED)."
+          # The HIP backend is compiled as a separate shared library.
+          # Its presence is the definitive proof that ROCm support is compiled in.
+          if python -m zipfile -l "$WHEEL" | grep -qi 'libggml-hip\|ggml-rocm\|ggml-hipblas'; then
+            echo "✅ ROCm verified: HIP backend library found in wheel."
           else
-            echo "❌ ERROR: hipblas/rocblas NOT found in NEEDED section!"
-            echo "       The wheel was likely compiled without ROCm support."
+            echo "❌ ERROR: No HIP backend library (libggml-hip.so) found in wheel!"
+            echo "   Possible causes:"
+            echo "   - amdclang/amdclang++ not found at build time"
+            echo "   - GGML_HIPBLAS=ON flag not picked up by CMake"
+            echo "   - ROCm installation incomplete"
             exit 1
           fi
-
-          rm -rf "$TMPDIR"
         shell: bash
 
       # ── Fix wheel tags so pip accepts them as linux_x86_64 wheels ─────────
