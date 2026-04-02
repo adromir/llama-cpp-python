@@ -57,13 +57,39 @@ jobs:
           sudo apt-get install -y "./${INSTALLER_DEB}"
           rm -f "./${INSTALLER_DEB}"
 
-          # Install ROCm stack (no GUI / graphics needed in CI)
+          # Install ROCm stack (no GUI / graphics needed in CI, no kernel driver)
           sudo amdgpu-install -y --usecase=rocm --no-dkms
+
+          # Explicitly install hipBLAS and rocBLAS development packages.
+          # These provide the headers and CMake modules (e.g. hipblas-config.cmake)
+          # that are required for compilation – they may not be included in the
+          # base 'rocm' usecase.
+          sudo apt-get install -y \
+            libhipblas-dev \
+            librocblas-dev \
+            hip-dev \
+            rocm-cmake
 
           # Ensure ROCm tools are in PATH for subsequent steps
           echo "/opt/rocm/bin" >> "$GITHUB_PATH"
           echo "ROCM_PATH=/opt/rocm" >> "$GITHUB_ENV"
           echo "HIP_PATH=/opt/rocm"  >> "$GITHUB_ENV"
+        shell: bash
+
+      # ── Diagnose ROCm installation before building ────────────────────────
+      # Prints key paths so failures are immediately diagnosable in the log.
+      - name: Diagnose ROCm installation
+        run: |
+          echo "=== ROCm version ==="
+          cat /opt/rocm/.info/version 2>/dev/null || echo "(version file not found)"
+          echo "=== HIP compilers ==="
+          for bin in amdclang amdclang++ hipcc; do
+            echo -n "  $bin: "; which $bin 2>/dev/null || echo "NOT FOUND"
+          done
+          echo "=== hipBLAS library ==="
+          find /opt/rocm -name 'libhipblas*' 2>/dev/null | head -5 || echo "NOT FOUND"
+          echo "=== HIP CMake modules ==="
+          find /opt/rocm -name 'hip-config.cmake' -o -name 'hipblas-config.cmake' 2>/dev/null | head -10 || echo "NOT FOUND"
         shell: bash
 
       # ── Set up the requested Python version ──────────────────────────────
@@ -77,6 +103,10 @@ jobs:
       # amdclang / amdclang++ are AMD’s ROCm-native LLVM/Clang compilers;
       # hipcc is only a thin wrapper around them. Using them directly is
       # cleaner and avoids GCC being picked up by CMake as the host compiler.
+      # CMAKE_HIP_COMPILER: CMake 3.21+ treats HIP as a first-class language;
+      #   this flag tells it which compiler to use for .hip/.cu device code.
+      # CMAKE_PREFIX_PATH: lets find_package(hip) / find_package(hipblas) locate
+      #   the CMake module files installed under /opt/rocm/lib/cmake/.
       # AMDGPU_TARGETS selects the GPU ISAs to compile for:
       #   gfx1201 = RDNA4 (RX 9060), gfx1200 = RDNA4 (RX 9070),
       #   gfx1100 = RDNA3 (RX 7000), gfx1030 = RDNA2 (RX 6000),
@@ -88,6 +118,8 @@ jobs:
             -DGGML_NATIVE=OFF
             -DCMAKE_C_COMPILER=/opt/rocm/bin/amdclang
             -DCMAKE_CXX_COMPILER=/opt/rocm/bin/amdclang++
+            -DCMAKE_HIP_COMPILER=/opt/rocm/bin/amdclang++
+            -DCMAKE_PREFIX_PATH=/opt/rocm
             -DAMDGPU_TARGETS=gfx1201;gfx1200;gfx1100;gfx1030;gfx906;gfx908
           FORCE_CMAKE: "1"
         run: |
@@ -225,19 +257,22 @@ jobs:
 
       # ── Build the wheel ──────────────────────────────────────────────────
       # On Windows the HIP SDK ships clang.exe in %HIP_PATH%\bin.
-      # CMake_HIP_COMPILER points CMake to the HIP-capable clang for device
-      # code, while MSVC (the default generator) handles the host (CPU) code.
-      # This is the officially supported hybrid approach for Windows ROCm.
+      # CMAKE_HIP_COMPILER must be set at runtime (inside the run block)
+      # because $env:HIP_PATH is only available after the install step sets it
+      # via GITHUB_ENV – it cannot be referenced inside the YAML env: block.
       - name: Build ROCm wheel (Windows)
         env:
           CMAKE_ARGS: >-
             -DGGML_HIPBLAS=ON
             -DGGML_NATIVE=OFF
-            -DCMAKE_HIP_COMPILER="$env:HIP_PATH\bin\clang.exe"
             -DAMDGPU_TARGETS=gfx1201;gfx1200;gfx1100;gfx1030;gfx906;gfx908
           CMAKE_GENERATOR: "Visual Studio 17 2022"
           FORCE_CMAKE: "1"
         run: |
+          # Append the HIP compiler path now that HIP_PATH env var is available
+          $env:CMAKE_ARGS += " -DCMAKE_HIP_COMPILER=`"$env:HIP_PATH\bin\clang.exe`""
+          $env:CMAKE_ARGS += " -DCMAKE_PREFIX_PATH=`"$env:HIP_PATH`""
+          Write-Host "CMAKE_ARGS: $env:CMAKE_ARGS"
           python -m pip install --upgrade pip build wheel setuptools
           python -m pip wheel . --no-deps --wheel-dir dist --verbose
         shell: pwsh
