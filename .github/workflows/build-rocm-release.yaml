@@ -71,9 +71,19 @@ jobs:
             rocm-cmake
 
           # Ensure ROCm tools are in PATH for subsequent steps
-          echo "/opt/rocm/bin" >> "$GITHUB_PATH"
-          echo "ROCM_PATH=/opt/rocm" >> "$GITHUB_ENV"
-          echo "HIP_PATH=/opt/rocm"  >> "$GITHUB_ENV"
+          # Use both /opt/rocm/bin and /opt/rocm/llvm/bin – the llvm/bin path
+          # contains the actual clang binary that HIP cmake modules look for via
+          # HIP_CLANG_PATH. /opt/rocm/bin/amdclang is just a symlink.
+          echo "/opt/rocm/bin:/opt/rocm/llvm/bin" >> "$GITHUB_PATH"
+          echo "ROCM_PATH=/opt/rocm"                    >> "$GITHUB_ENV"
+          echo "HIP_PATH=/opt/rocm"                     >> "$GITHUB_ENV"
+          echo "HIP_PLATFORM=amd"                       >> "$GITHUB_ENV"
+          echo "HIP_CLANG_PATH=/opt/rocm/llvm/bin"      >> "$GITHUB_ENV"
+          echo "HIP_INCLUDE_PATH=/opt/rocm/include"     >> "$GITHUB_ENV"
+          echo "HIP_LIB_PATH=/opt/rocm/lib"             >> "$GITHUB_ENV"
+          echo "HIP_DEVICE_LIB_PATH=/opt/rocm/lib/llvm/amdgcn/bitcode" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:/opt/rocm/llvm/lib" >> "$GITHUB_ENV"
+          echo "CPATH=/opt/rocm/include"                >> "$GITHUB_ENV"
         shell: bash
 
       # ── Diagnose ROCm installation before building ────────────────────────
@@ -83,13 +93,17 @@ jobs:
           echo "=== ROCm version ==="
           cat /opt/rocm/.info/version 2>/dev/null || echo "(version file not found)"
           echo "=== HIP compilers ==="
-          for bin in amdclang amdclang++ hipcc; do
-            echo -n "  $bin: "; which $bin 2>/dev/null || echo "NOT FOUND"
-          done
+          echo -n "  /opt/rocm/bin/amdclang:      "; ls -la /opt/rocm/bin/amdclang    2>/dev/null || echo "NOT FOUND"
+          echo -n "  /opt/rocm/llvm/bin/clang:    "; ls -la /opt/rocm/llvm/bin/clang  2>/dev/null || echo "NOT FOUND"
+          echo -n "  /opt/rocm/llvm/bin/clang++:  "; ls -la /opt/rocm/llvm/bin/clang++ 2>/dev/null || echo "NOT FOUND"
+          echo "=== Device lib bitcode ==="
+          ls /opt/rocm/lib/llvm/amdgcn/bitcode/ 2>/dev/null | head -5 || echo "NOT FOUND"
           echo "=== hipBLAS library ==="
           find /opt/rocm -name 'libhipblas*' 2>/dev/null | head -5 || echo "NOT FOUND"
           echo "=== HIP CMake modules ==="
           find /opt/rocm -name 'hip-config.cmake' -o -name 'hipblas-config.cmake' 2>/dev/null | head -10 || echo "NOT FOUND"
+          echo "=== HIP_CLANG_PATH ==="
+          echo "  ${HIP_CLANG_PATH:-<not set>}"
         shell: bash
 
       # ── Set up the requested Python version ──────────────────────────────
@@ -99,27 +113,32 @@ jobs:
           python-version: ${{ matrix.python }}
 
       # ── Build the wheel ──────────────────────────────────────────────────
-      # CMAKE_ARGS enables hipBLAS (ROCm) support.
-      # CMAKE_HIP_COMPILER: CMake 3.21+ treats HIP as first-class language.
-      # CMAKE_PREFIX_PATH: base path so find_package modules can be located.
-      # hip_DIR / hipblas_DIR / rocblas_DIR: explicit cmake config locations,
-      #   needed because CMAKE_PREFIX_PATH alone sometimes isn't sufficient when
-      #   ROCm was installed via amdgpu-install rather than a system package.
-      # AMDGPU_TARGETS selects GPU ISAs:
-      #   gfx1201/gfx1200 = RDNA4, gfx1100 = RDNA3, gfx1030 = RDNA2,
-      #   gfx906 = Vega20 (MI50), gfx908 = Arcturus (MI100)
+      # Key cmake flags (derived from analysis of working ROCm build workflows):
+      #
+      # GGML_HIP=ON       – correct option name in ggml 0.9.x (GGML_HIPBLAS is gone)
+      # CMAKE_C/CXX_COMPILER – use /opt/rocm/llvm/bin/clang directly; this is the
+      #   actual HIP-aware clang. /opt/rocm/bin/amdclang is just a symlink but
+      #   cmake's HIP language detection works more reliably with the real path.
+      # CMAKE_HIP_COMPILER  – same clang++ for device code compilation
+      # HIP_CLANG_PATH env  – tells HIP cmake modules where to find clang
+      # HIP_DEVICE_LIB_PATH – location of AMDGCN bitcode device libraries
+      # CMAKE_CXX_FLAGS     – explicit include path (matches working reference)
+      # GPU_TARGETS         – ggml HIP backend cmake variable (AMDGPU_TARGETS also
+      #   kept for compatibility; both are passed)
       - name: Build ROCm wheel
         env:
           CMAKE_ARGS: >-
             -DGGML_HIP=ON
             -DGGML_NATIVE=OFF
-            -DCMAKE_C_COMPILER=/opt/rocm/bin/amdclang
-            -DCMAKE_CXX_COMPILER=/opt/rocm/bin/amdclang++
-            -DCMAKE_HIP_COMPILER=/opt/rocm/bin/amdclang++
+            -DCMAKE_C_COMPILER=/opt/rocm/llvm/bin/clang
+            -DCMAKE_CXX_COMPILER=/opt/rocm/llvm/bin/clang++
+            -DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++
+            -DCMAKE_CXX_FLAGS=-I/opt/rocm/include
             -DCMAKE_PREFIX_PATH=/opt/rocm
             -Dhip_DIR=/opt/rocm/lib/cmake/hip
             -Dhipblas_DIR=/opt/rocm/lib/cmake/hipblas
             -Drocblas_DIR=/opt/rocm/lib/cmake/rocblas
+            -DGPU_TARGETS=gfx1201;gfx1200;gfx1100;gfx1030;gfx906;gfx908
             -DAMDGPU_TARGETS=gfx1201;gfx1200;gfx1100;gfx1030;gfx906;gfx908
           FORCE_CMAKE: "1"
         run: |
@@ -275,6 +294,7 @@ jobs:
           CMAKE_ARGS: >-
             -DGGML_HIP=ON
             -DGGML_NATIVE=OFF
+            -DGPU_TARGETS=gfx1201;gfx1200;gfx1100;gfx1030;gfx906;gfx908
             -DAMDGPU_TARGETS=gfx1201;gfx1200;gfx1100;gfx1030;gfx906;gfx908
           CMAKE_GENERATOR: "Visual Studio 17 2022"
           FORCE_CMAKE: "1"
@@ -282,6 +302,7 @@ jobs:
           # Append the HIP compiler path now that HIP_PATH env var is available
           $env:CMAKE_ARGS += " -DCMAKE_HIP_COMPILER=`"$env:HIP_PATH\bin\clang.exe`""
           $env:CMAKE_ARGS += " -DCMAKE_PREFIX_PATH=`"$env:HIP_PATH`""
+          $env:CMAKE_ARGS += " -DCMAKE_CXX_FLAGS=`"-I$env:HIP_PATH\include`""
           Write-Host "CMAKE_ARGS: $env:CMAKE_ARGS"
           python -m pip install --upgrade pip build wheel setuptools
           python -m pip wheel . --no-deps --wheel-dir dist --verbose
