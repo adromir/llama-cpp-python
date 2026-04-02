@@ -111,7 +111,7 @@ jobs:
       - name: Build ROCm wheel
         env:
           CMAKE_ARGS: >-
-            -DGGML_HIPBLAS=ON
+            -DGGML_HIP=ON
             -DGGML_NATIVE=OFF
             -DCMAKE_C_COMPILER=/opt/rocm/bin/amdclang
             -DCMAKE_CXX_COMPILER=/opt/rocm/bin/amdclang++
@@ -273,7 +273,7 @@ jobs:
       - name: Build ROCm wheel (Windows)
         env:
           CMAKE_ARGS: >-
-            -DGGML_HIPBLAS=ON
+            -DGGML_HIP=ON
             -DGGML_NATIVE=OFF
             -DAMDGPU_TARGETS=gfx1201;gfx1200;gfx1100;gfx1030;gfx906;gfx908
           CMAKE_GENERATOR: "Visual Studio 17 2022"
